@@ -1,13 +1,9 @@
-import 'package:flutter/services.dart';
+import 'dart:async';
+import 'dart:math' as math;
+import 'package:sensors_plus/sensors_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../../../../core/platform/platform_channels.dart';
 import '../../domain/entities/step_data.dart';
 
-/// DataSource para acelerómetro usando EventChannel
-///
-/// - EventChannel se usa para STREAMS de datos continuos
-/// - A diferencia de MethodChannel (petición/respuesta),
-///   EventChannel envía datos constantemente
 abstract class AccelerometerDataSource {
   Stream<StepData> get stepStream;
   Future<void> startCounting();
@@ -16,33 +12,43 @@ abstract class AccelerometerDataSource {
 }
 
 class AccelerometerDataSourceImpl implements AccelerometerDataSource {
-  /// EventChannel: para recibir stream de datos
-  final EventChannel _eventChannel = const EventChannel(
-    PlatformChannels.accelerometer,
-  );
-
-  /// MethodChannel auxiliar: para control (start/stop)
-  final MethodChannel _methodChannel = const MethodChannel(
-    '${PlatformChannels.accelerometer}/control',
-  );
+  final StreamController<StepData> _controller = StreamController.broadcast();
+  StreamSubscription<AccelerometerEvent>? _sub;
+  int _steps = 0;
+  bool _stepInProgress = false;
 
   @override
-  Stream<StepData> get stepStream {
-    /// receiveBroadcastStream(): crea un stream que recibe
-    /// datos continuamente desde el lado Android
-    return _eventChannel.receiveBroadcastStream().map((event) {
-      return StepData.fromMap(event as Map<dynamic, dynamic>);
+  Stream<StepData> get stepStream => _controller.stream;
+
+  @override
+  Future<void> startCounting() async {
+    _sub = accelerometerEvents.listen((event) {
+      final mag =
+          math.sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
+      // High-pass approximation (remove gravity)
+      final accel = (mag - 9.81).abs();
+
+      // Simple peak detection
+      const threshold = 1.8; // tweak as needed
+      const resetThreshold = 0.9;
+
+      if (!_stepInProgress && accel > threshold) {
+        _stepInProgress = true;
+        _steps++;
+        final activity =
+            accel > 4.0 ? ActivityType.running : ActivityType.walking;
+        _controller.add(StepData(
+            stepCount: _steps, activityType: activity, magnitude: accel));
+      } else if (_stepInProgress && accel < resetThreshold) {
+        _stepInProgress = false;
+      }
     });
   }
 
   @override
-  Future<void> startCounting() async {
-    await _methodChannel.invokeMethod('start');
-  }
-
-  @override
   Future<void> stopCounting() async {
-    await _methodChannel.invokeMethod('stop');
+    await _sub?.cancel();
+    _sub = null;
   }
 
   @override

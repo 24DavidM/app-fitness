@@ -1,13 +1,6 @@
-import 'package:flutter/services.dart';
-import 'package:permission_handler/permission_handler.dart';
-import '../../../../core/platform/platform_channels.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../domain/entities/location_point.dart';
 
-/// DataSource para GPS
-///
-/// EXPLICACIÓN DIDÁCTICA:
-/// - Combina MethodChannel (operaciones puntuales)
-/// - Con EventChannel (stream de ubicaciones)
 abstract class GpsDataSource {
   Future<LocationPoint?> getCurrentLocation();
   Stream<LocationPoint> get locationStream;
@@ -16,51 +9,69 @@ abstract class GpsDataSource {
 }
 
 class GpsDataSourceImpl implements GpsDataSource {
-  final MethodChannel _methodChannel = const MethodChannel(
-    PlatformChannels.gps,
-  );
-
-  final EventChannel _eventChannel = const EventChannel(
-    '${PlatformChannels.gps}/stream',
-  );
-
   @override
   Future<LocationPoint?> getCurrentLocation() async {
     try {
-      final result = await _methodChannel.invokeMethod('getCurrentLocation');
-      if (result != null) {
-        return LocationPoint.fromMap(result as Map<dynamic, dynamic>);
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return null;
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
       }
-      return null;
-    } on PlatformException catch (e) {
-      print('Error obteniendo ubicación: ${e.message}');
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return null;
+      }
+
+      final pos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.best);
+
+      return LocationPoint(
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        altitude: pos.altitude,
+        speed: pos.speed,
+        accuracy: pos.accuracy,
+        timestamp: pos.timestamp ?? DateTime.now(),
+      );
+    } catch (e) {
+      print('Error obteniendo ubicación: $e');
       return null;
     }
   }
 
   @override
   Stream<LocationPoint> get locationStream {
-    return _eventChannel.receiveBroadcastStream().map((event) {
-      return LocationPoint.fromMap(event as Map<dynamic, dynamic>);
+    return Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.best,
+        distanceFilter: 5,
+      ),
+    ).map((pos) {
+      return LocationPoint(
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        altitude: pos.altitude,
+        speed: pos.speed,
+        accuracy: pos.accuracy,
+        timestamp: pos.timestamp ?? DateTime.now(),
+      );
     });
   }
 
   @override
   Future<bool> isGpsEnabled() async {
-    try {
-      return await _methodChannel.invokeMethod('isGpsEnabled') ?? false;
-    } on PlatformException {
-      return false;
-    }
+    return await Geolocator.isLocationServiceEnabled();
   }
 
   @override
   Future<bool> requestPermissions() async {
-    final locationStatus = await Permission.location.request();
-    if (!locationStatus.isGranted) {
-      final whenInUseStatus = await Permission.locationWhenInUse.request();
-      return whenInUseStatus.isGranted;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
     }
-    return locationStatus.isGranted;
+    return permission == LocationPermission.always ||
+        permission == LocationPermission.whileInUse;
   }
 }
